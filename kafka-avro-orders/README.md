@@ -136,7 +136,28 @@ parts; right now every record is just printed.)
 Stop it with `Ctrl+C`. Restarting it resumes from the last committed offset
 (no re-processing of already-committed records, no gaps).
 
-### 6. (later parts) Real-time aggregation, retry, DLQ
+### 6. Real-time aggregation
+
+The consumer now tracks a **running average of prices** as it processes
+orders — both a global average and one per product — via
+[`RunningAverage`](src/main/java/com/bigdata/orders/RunningAverage.java).
+It's incremental (keeps only a running `count`/`sum` per key, not the whole
+history) so it stays O(1) per message regardless of how many orders have
+been processed.
+
+Only **successfully processed** orders count toward the average — a message
+that ends up in the DLQ (added in a later part) must never skew it.
+
+Every 10 successfully processed orders, the consumer logs a summary line:
+
+```
+[AGG] processed=30 globalAvg=248.37 | Item1 avg=251.02 (n=6) | Item2 avg=239.88 (n=7) ...
+```
+
+No setup changes needed — just re-run the consumer from part 5, it now logs
+this automatically.
+
+### 7. (later parts) Retry logic, DLQ
 
 _(filled in as those parts are built)_
 

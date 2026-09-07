@@ -29,8 +29,12 @@ public class OrderConsumer {
 
     private static final Logger log = LoggerFactory.getLogger(OrderConsumer.class);
 
+    /** Print an aggregation summary after every this-many successfully processed orders. */
+    private static final int SUMMARY_EVERY = 10;
+
     public static void main(String[] args) {
         Properties props = buildConsumerProperties();
+        RunningAverage runningAverage = new RunningAverage();
 
         try (KafkaConsumer<String, Order> consumer = new KafkaConsumer<>(props)) {
             consumer.subscribe(Collections.singletonList(Config.ORDERS_TOPIC));
@@ -52,6 +56,14 @@ public class OrderConsumer {
                     log.info("Received orderId={} product={} price={} (partition={}, offset={})",
                             order.getOrderId(), order.getProduct(), order.getPrice(),
                             record.partition(), record.offset());
+
+                    // Only successfully processed orders count toward the average.
+                    // (Failed/DLQ'd orders are excluded once that logic is added.)
+                    runningAverage.add(order.getProduct(), order.getPrice());
+
+                    if (runningAverage.globalCount() % SUMMARY_EVERY == 0) {
+                        log.info("[AGG] {}", runningAverage.summary());
+                    }
                 }
 
                 // Manual commit: only after the whole batch has been handled.
