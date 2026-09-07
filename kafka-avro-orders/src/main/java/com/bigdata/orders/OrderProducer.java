@@ -32,6 +32,19 @@ public class OrderProducer {
             "Item1", "Item2", "Item3", "Item4", "Item5"
     };
 
+    // Deterministic fault injection, so a live demo reliably exercises both
+    // the retry path and the DLQ path every run:
+    //   - every 7th order  -> product renamed to "FLAKY-<product>", which
+    //     OrderProcessor treats as a transient failure that succeeds after
+    //     a couple of retries.
+    //   - every 11th order -> price forced negative, which OrderProcessor
+    //     treats as a permanent (unrecoverable) validation failure, routed
+    //     straight to the DLQ.
+    // (An order divisible by both 7 and 11, i.e. every 77th, is treated as
+    // permanent - an invalid order is invalid regardless of product name.)
+    private static final int FLAKY_EVERY_NTH = 7;
+    private static final int INVALID_EVERY_NTH = 11;
+
     public static void main(String[] args) throws InterruptedException {
         int count = getIntArg(args, "--count", 30);
         long delayMs = getIntArg(args, "--delay-ms", 300);
@@ -71,6 +84,19 @@ public class OrderProducer {
         String orderId = String.valueOf(orderIdNum);
         String product = PRODUCTS[ThreadLocalRandom.current().nextInt(PRODUCTS.length)];
         float price = roundToTwoDecimals(ThreadLocalRandom.current().nextFloat() * 499f + 1f);
+
+        boolean injectInvalid = orderIdNum % INVALID_EVERY_NTH == 0;
+        boolean injectFlaky = orderIdNum % FLAKY_EVERY_NTH == 0;
+
+        if (injectInvalid) {
+            // Permanent failure: invalid price, will fail validation every time.
+            price = -1f;
+            log.debug("Injecting PERMANENT fault into orderId={} (invalid price)", orderId);
+        } else if (injectFlaky) {
+            // Transient failure: consumer will fail this a couple of times then succeed.
+            product = "FLAKY-" + product;
+            log.debug("Injecting TRANSIENT fault into orderId={} (flaky product)", orderId);
+        }
 
         return Order.newBuilder()
                 .setOrderId(orderId)

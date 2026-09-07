@@ -157,9 +157,40 @@ Every 10 successfully processed orders, the consumer logs a summary line:
 No setup changes needed — just re-run the consumer from part 5, it now logs
 this automatically.
 
-### 7. (later parts) Retry logic, DLQ
+### 7. Fault injection and retry logic
 
-_(filled in as those parts are built)_
+The producer deterministically injects two kinds of bad orders, so a live
+demo reliably exercises both failure paths every run:
+
+| Rule | Injected fault | Failure type | Behaviour |
+|---|---|---|---|
+| every 11th order (`orderId % 11 == 0`) | `price = -1` | **Permanent** | fails validation every time — no retry, straight to DLQ |
+| every 7th order (`orderId % 7 == 0`) | `product` prefixed `FLAKY-` | **Transient** | fails on attempts 1–2, succeeds on attempt 3 (simulates a downstream dependency recovering) |
+
+(An order that's a multiple of both 7 and 11, i.e. every 77th, is treated as
+permanent — invalid data is invalid regardless of product name.)
+
+On the consumer side:
+
+- [`OrderProcessor`](src/main/java/com/bigdata/orders/OrderProcessor.java) —
+  validates each order and throws `PermanentException` (invalid data) or
+  `TransientException` (simulated flakiness).
+- [`RetryExecutor`](src/main/java/com/bigdata/orders/RetryExecutor.java) —
+  retries a `TransientException` up to 3 attempts total, with exponential
+  backoff + jitter (~200ms → ~400ms → ~800ms). A `PermanentException` is
+  never retried. If all retries are exhausted, the failure is treated the
+  same as permanent from here on.
+
+Currently, an unrecoverable failure is logged as `UNRECOVERABLE failure for
+orderId=...` and excluded from the running average. Routing it to the Dead
+Letter Queue is added in the next part.
+
+No setup changes needed — just re-run the producer and consumer from parts 4
+and 5; the new behaviour is automatic.
+
+### 8. (later part) Dead Letter Queue
+
+_(filled in as that part is built)_
 
 ---
 

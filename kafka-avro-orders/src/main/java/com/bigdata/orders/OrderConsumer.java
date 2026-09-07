@@ -19,9 +19,11 @@ import java.util.Properties;
 /**
  * Consumes Avro-serialized order messages from the "orders" topic.
  *
- * <p>This is the basic version: it deserializes and prints each order, then
- * commits offsets manually once the batch has been handled. Running-average
- * aggregation, retry logic and DLQ handling are added in later parts.</p>
+ * <p>Each order is run through {@link OrderProcessor} via {@link RetryExecutor}:
+ * transient failures are retried with backoff, permanent failures (and
+ * exhausted retries) fail immediately. Only successfully processed orders
+ * feed the running-average aggregation. DLQ routing for failed orders is
+ * added in the next part — for now failures are logged as such.</p>
  *
  * <p>Usage: {@code mvn exec:java -Dexec.mainClass=com.bigdata.orders.OrderConsumer}</p>
  */
@@ -35,6 +37,7 @@ public class OrderConsumer {
     public static void main(String[] args) {
         Properties props = buildConsumerProperties();
         RunningAverage runningAverage = new RunningAverage();
+        OrderProcessor processor = new OrderProcessor();
 
         try (KafkaConsumer<String, Order> consumer = new KafkaConsumer<>(props)) {
             consumer.subscribe(Collections.singletonList(Config.ORDERS_TOPIC));
@@ -53,21 +56,33 @@ public class OrderConsumer {
 
                 for (ConsumerRecord<String, Order> record : records) {
                     Order order = record.value();
-                    log.info("Received orderId={} product={} price={} (partition={}, offset={})",
-                            order.getOrderId(), order.getProduct(), order.getPrice(),
-                            record.partition(), record.offset());
 
-                    // Only successfully processed orders count toward the average.
-                    // (Failed/DLQ'd orders are excluded once that logic is added.)
-                    runningAverage.add(order.getProduct(), order.getPrice());
+                    try {
+                        RetryExecutor.executeWithRetry(processor, order);
 
-                    if (runningAverage.globalCount() % SUMMARY_EVERY == 0) {
-                        log.info("[AGG] {}", runningAverage.summary());
+                        log.info("Processed orderId={} product={} price={} (partition={}, offset={})",
+                                order.getOrderId(), order.getProduct(), order.getPrice(),
+                                record.partition(), record.offset());
+
+                        // Only successfully processed orders count toward the average.
+                        runningAverage.add(order.getProduct(), order.getPrice());
+
+                        if (runningAverage.globalCount() % SUMMARY_EVERY == 0) {
+                            log.info("[AGG] {}", runningAverage.summary());
+                        }
+                    } catch (PermanentException | TransientException e) {
+                        // TransientException here means retries were exhausted.
+                        // Next part: route this record to the DLQ instead of
+                        // just logging it.
+                        log.error("UNRECOVERABLE failure for orderId={} (partition={}, offset={}): {}",
+                                order.getOrderId(), record.partition(), record.offset(), e.getMessage());
                     }
                 }
 
-                // Manual commit: only after the whole batch has been handled.
-                // In later parts this moves to "after processed OR sent to DLQ".
+                // Manual commit: only after the whole batch has been handled
+                // (each record either processed successfully or failed
+                // terminally). In the next part this becomes "processed OR
+                // sent to DLQ" once DLQ writes are added.
                 consumer.commitSync();
             }
         }
