@@ -70,7 +70,29 @@ This creates:
 
 Topic auto-creation is disabled on the broker so these must be created explicitly.
 
-### 3. (later parts) Build and run the producer/consumer
+### 3. Avro schema
+
+The order message schema lives at [`src/main/avro/order.avsc`](src/main/avro/order.avsc):
+
+```json
+{
+  "orderId": "string",
+  "product": "string",
+  "price":   "float"
+}
+```
+
+The `avro-maven-plugin` generates a typed `com.bigdata.orders.avro.Order` class
+from this file during `mvn generate-sources` / `mvn compile`. The generated
+code is **not** committed to Git — it's build output, produced fresh into
+`target/generated-sources/avro` every build. To generate it without a full
+build:
+
+```powershell
+mvn generate-sources
+```
+
+### 4. (later parts) Build and run the producer/consumer
 
 _(filled in as those parts are built)_
 
