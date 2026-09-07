@@ -21,9 +21,11 @@ import java.util.Properties;
  *
  * <p>Each order is run through {@link OrderProcessor} via {@link RetryExecutor}:
  * transient failures are retried with backoff, permanent failures (and
- * exhausted retries) fail immediately. Only successfully processed orders
- * feed the running-average aggregation. DLQ routing for failed orders is
- * added in the next part — for now failures are logged as such.</p>
+ * exhausted retries) are routed to the Dead Letter Queue via
+ * {@link DlqPublisher}. Only successfully processed orders feed the
+ * running-average aggregation. An offset is committed only once its record
+ * has been either processed successfully or safely written to the DLQ —
+ * never before.</p>
  *
  * <p>Usage: {@code mvn exec:java -Dexec.mainClass=com.bigdata.orders.OrderConsumer}</p>
  */
@@ -39,7 +41,9 @@ public class OrderConsumer {
         RunningAverage runningAverage = new RunningAverage();
         OrderProcessor processor = new OrderProcessor();
 
-        try (KafkaConsumer<String, Order> consumer = new KafkaConsumer<>(props)) {
+        try (KafkaConsumer<String, Order> consumer = new KafkaConsumer<>(props);
+             DlqPublisher dlqPublisher = new DlqPublisher()) {
+
             consumer.subscribe(Collections.singletonList(Config.ORDERS_TOPIC));
             log.info("Consumer started. Subscribed to '{}', group='{}'. Waiting for messages...",
                     Config.ORDERS_TOPIC, Config.CONSUMER_GROUP_ID);
@@ -71,18 +75,20 @@ public class OrderConsumer {
                             log.info("[AGG] {}", runningAverage.summary());
                         }
                     } catch (PermanentException | TransientException e) {
-                        // TransientException here means retries were exhausted.
-                        // Next part: route this record to the DLQ instead of
-                        // just logging it.
-                        log.error("UNRECOVERABLE failure for orderId={} (partition={}, offset={}): {}",
-                                order.getOrderId(), record.partition(), record.offset(), e.getMessage());
+                        // PermanentException: failed on the very first attempt (1).
+                        // TransientException here means retries were exhausted
+                        // (RetryExecutor.MAX_ATTEMPTS attempts were made).
+                        int attempts = (e instanceof PermanentException) ? 1 : RetryExecutor.MAX_ATTEMPTS;
+
+                        // Synchronous: we must know this landed before moving on,
+                        // otherwise a failed order could be lost (neither
+                        // processed nor dead-lettered) once we commit below.
+                        dlqPublisher.send(record, order, e, attempts);
                     }
                 }
 
-                // Manual commit: only after the whole batch has been handled
-                // (each record either processed successfully or failed
-                // terminally). In the next part this becomes "processed OR
-                // sent to DLQ" once DLQ writes are added.
+                // Manual commit: only after every record in the batch has been
+                // either processed successfully or safely written to the DLQ.
                 consumer.commitSync();
             }
         }

@@ -23,7 +23,8 @@ public class RetryExecutor {
 
     private static final Logger log = LoggerFactory.getLogger(RetryExecutor.class);
 
-    private static final int MAX_ATTEMPTS = 3;
+    /** Exposed so callers (e.g. the DLQ publisher) can record how many attempts were made. */
+    public static final int MAX_ATTEMPTS = 3;
     private static final long BASE_BACKOFF_MS = 200;
 
     /**

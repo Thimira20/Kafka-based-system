@@ -188,7 +188,48 @@ Letter Queue is added in the next part.
 No setup changes needed — just re-run the producer and consumer from parts 4
 and 5; the new behaviour is automatic.
 
-### 8. (later part) Dead Letter Queue
+### 8. Dead Letter Queue
+
+Orders that fail permanently — invalid data, or a transient failure whose
+retries were all exhausted — are now published to the `orders.DLQ` topic
+(created back in [step 2](#2-create-the-topics)) instead of just being logged.
+
+[`DlqPublisher`](src/main/java/com/bigdata/orders/DlqPublisher.java) republishes
+the original Avro order **unchanged** to `orders.DLQ`, and attaches the
+failure context as Kafka headers rather than folding it into the payload:
+
+| Header | Example | Meaning |
+|---|---|---|
+| `x-error-class` | `PermanentException` | which exception type caused the failure |
+| `x-error-message` | `Order 1011 has an invalid price: -1.0` | human-readable reason |
+| `x-original-topic` | `orders` | where the record originally came from |
+| `x-original-partition` | `1` | original partition |
+| `x-original-offset` | `42` | original offset |
+| `x-attempts` | `3` | how many processing attempts were made |
+| `x-failed-at` | `2026-01-01T12:00:00Z` | when it was dead-lettered |
+
+**Ordering guarantee:** the DLQ write is synchronous (`producer.send(...).get()`)
+and happens *before* the consumer commits the original record's offset. If the
+DLQ write itself failed, the exception propagates and the offset is **not**
+committed — so a crash here means the record is safely re-delivered on
+restart rather than silently lost. This is why the DLQ producer uses its own
+`KafkaProducer` with `acks=all` + idempotence, same as the main producer.
+
+To inspect the DLQ during a demo, use Kafka UI (`localhost:8080` → Topics →
+`orders.DLQ` → Messages) — headers and the Avro-decoded payload are both
+visible there. Alternatively:
+
+```powershell
+docker exec kafka kafka-console-consumer --bootstrap-server localhost:9092 --topic orders.DLQ --from-beginning --property print.headers=true
+```
+
+(Payload prints as raw Avro bytes with the console consumer since it isn't
+Avro-aware — Kafka UI is the better option for a readable demo.)
+
+No setup changes needed beyond the topics already created in step 2 — just
+re-run the producer and consumer.
+
+### 9. (final part) Polish, demo script
 
 _(filled in as that part is built)_
 
