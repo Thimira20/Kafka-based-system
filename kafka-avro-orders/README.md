@@ -118,9 +118,27 @@ To verify it worked:
 - Open Kafka UI (`http://localhost:8080`) → Topics → `orders` → Messages, to
   see the Avro-decoded orders.
 
-### 5. (later parts) Build and run the consumer
+### 5. Run the consumer
 
-_(filled in as that part is built)_
+In a second terminal, while the producer is running (or after it's finished —
+the consumer starts from the earliest offset on first run):
+
+```powershell
+mvn compile exec:java "-Dexec.mainClass=com.bigdata.orders.OrderConsumer"
+```
+
+This deserializes each Avro order and logs it. Offsets are committed
+**manually** (`enable.auto.commit=false`) once a poll batch has been handled —
+never before — so that a crash mid-processing doesn't silently skip or drop
+records. (Running-average aggregation and DLQ handling are added in later
+parts; right now every record is just printed.)
+
+Stop it with `Ctrl+C`. Restarting it resumes from the last committed offset
+(no re-processing of already-committed records, no gaps).
+
+### 6. (later parts) Real-time aggregation, retry, DLQ
+
+_(filled in as those parts are built)_
 
 ---
 
