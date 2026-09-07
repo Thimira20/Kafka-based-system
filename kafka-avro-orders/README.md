@@ -6,13 +6,47 @@ serialization with Confluent Schema Registry. Built for the Big Data
 
 ## Features (built incrementally — see commit history)
 
-- [ ] Avro-serialized order messages (`orderId`, `product`, `price`)
-- [ ] Producer publishing to a `orders` topic
-- [ ] Consumer with manual offset commits
-- [ ] Real-time running average of prices (global + per-product)
-- [ ] Retry logic for transient failures (exponential backoff)
-- [ ] Dead Letter Queue for permanently failed messages
-- [ ] Live demo walkthrough
+- [x] Avro-serialized order messages (`orderId`, `product`, `price`)
+- [x] Producer publishing to a `orders` topic
+- [x] Consumer with manual offset commits
+- [x] Real-time running average of prices (global + per-product)
+- [x] Retry logic for transient failures (exponential backoff)
+- [x] Dead Letter Queue for permanently failed messages
+- [x] Live demo walkthrough
+
+## Architecture
+
+```
+                    ┌───────────────────┐
+                    │  Schema Registry   │   order.avsc registered as
+                    │  (localhost:8081)  │   subject "orders-value"
+                    └─────────▲──────────┘
+                              │ register / fetch schema id
+                              │
+   ┌──────────────┐   Avro   │        ┌────────────────────────────┐
+   │ OrderProducer │─────────┴───────▶│   topic: orders (3 parts)   │
+   │ (injects some │                  └──────────────┬─────────────┘
+   │  faults)      │                                 │
+   └──────────────┘                                 ▼
+                                       ┌────────────────────────────┐
+                                       │        OrderConsumer        │
+                                       │  1. OrderProcessor.process   │
+                                       │  2. RetryExecutor (transient)│
+                                       │  3. RunningAverage (success) │
+                                       │  4. manual commitSync()      │
+                                       └───────────────┬──────────────┘
+                                          permanent /  │
+                                          exhausted     ▼
+                                          retries  ┌────────────────────┐
+                                          ─────────▶│ topic: orders.DLQ  │
+                                                    │ (+ error headers)  │
+                                                    └────────────────────┘
+```
+
+Everything (topics, both apps) is a single logical pipeline: one producer,
+one consumer, one broker, backed by Schema Registry for Avro. See
+[Design decisions](#design-decisions) below for the reasoning behind the
+key choices.
 
 ## Prerequisites
 
@@ -229,11 +263,103 @@ Avro-aware — Kafka UI is the better option for a readable demo.)
 No setup changes needed beyond the topics already created in step 2 — just
 re-run the producer and consumer.
 
-### 9. (final part) Polish, demo script
+### 9. Building a standalone jar (optional)
 
-_(filled in as that part is built)_
+`mvn package` produces two jars in `target/`:
+
+- `kafka-avro-orders-1.0.0.jar` — thin jar, needs dependencies on the classpath
+- `kafka-avro-orders-1.0.0-all.jar` — shaded/fat jar with all dependencies bundled
+
+Run either main class directly from the fat jar without Maven:
+
+```powershell
+java -cp target/kafka-avro-orders-1.0.0-all.jar com.bigdata.orders.OrderProducer --count 30 --delay-ms 300
+java -cp target/kafka-avro-orders-1.0.0-all.jar com.bigdata.orders.OrderConsumer
+```
+
+## Design decisions
+
+A few choices worth calling out (the kind of thing likely to come up in the
+live demo Q&A):
+
+- **Manual offset commits, not auto-commit.** `enable.auto.commit=false` and
+  an explicit `consumer.commitSync()` at the end of each poll batch, only
+  after every record in it has been either processed or safely dead-lettered.
+  Auto-commit could commit an offset before its message was actually handled,
+  losing it silently on a crash.
+- **DLQ headers, not a modified payload.** The dead-lettered message keeps
+  the exact same Avro schema as the original order; failure context
+  (`x-error-class`, `x-original-offset`, etc.) rides in Kafka headers instead.
+  This keeps the DLQ trivially replayable back into the main flow if desired,
+  and keeps "business data" and "operational metadata" cleanly separated.
+- **In-loop retry, not a separate retry topic.** Retrying with short
+  (sub-second) exponential backoff directly inside the consumer's poll loop
+  is simpler and sufficient here, and stays safely under
+  `max.poll.interval.ms` so it doesn't trigger a rebalance. A production
+  system with longer or unbounded retry windows would instead publish to a
+  delayed `orders.retry` topic and let a separate process re-consume it
+  later, rather than blocking the poll loop — noted as the natural next step
+  if retry durations grow.
+- **Broker-level retry vs. application-level retry.** The producer's own
+  `retries=3` / `acks=all` config handles *transient network/broker* issues
+  during the send itself. That's a different layer from the consumer's
+  `RetryExecutor`, which retries *business-logic* failures (a simulated
+  downstream dependency being briefly down). Both exist and matter, but
+  address different failure modes.
+- **Schema Registry over ad-hoc Avro.** Using Confluent Schema Registry
+  instead of just shipping `order.avsc` alongside raw Avro bytes gives
+  schema evolution/compatibility checks for free and is closer to how this
+  looks in a real deployment.
+- **Deterministic fault injection over random.** The producer injects faults
+  by a fixed rule (every 7th/11th order) rather than randomly, so a live
+  demo reliably exercises both the retry-recovery path and the DLQ path on
+  every run — no risk of a demo run where the flaky/DLQ paths just don't
+  happen to trigger.
+
+## Live demo script
+
+1. `docker compose up -d` then `docker compose ps` — show all 3 containers
+   healthy. Open Kafka UI (`localhost:8080`) — topics `orders` and
+   `orders.DLQ` exist and are empty.
+2. `curl http://localhost:8081/subjects` — empty (`[]`).
+3. Start the producer (`--count 30 --delay-ms 500` reads comfortably).
+   Re-run the `curl` — now shows `["orders-value"]`. Optionally
+   `curl http://localhost:8081/subjects/orders-value/versions/1` to show the
+   registered schema JSON.
+4. Start the consumer in a second terminal, side by side with the producer.
+   Narrate what's visible live:
+   - normal orders processed immediately
+   - `FLAKY-` orders: two `Transient failure ... retrying in ...ms` log lines,
+     then a successful process on the 3rd attempt
+   - invalid-price orders: sent straight to the DLQ, no retry attempted
+   - `[AGG]` summary lines updating every 10 successful orders
+5. Kafka UI → `orders.DLQ` → Messages — show the dead-lettered orders and
+   their headers (`x-error-class`, `x-original-offset`, `x-attempts`, ...).
+6. Kill the consumer mid-run (`Ctrl+C`), restart it — show it resumes from
+   the last committed offset: no re-processing of already-handled orders, no
+   gaps, running average continues from where it left off in this new
+   process (note: the in-memory average itself resets on restart since it
+   isn't persisted — call this out explicitly, it's a fair follow-up question).
+
+### Sample output
+
+```
+14:02:11.302 [main] INFO  OrderProducer - Sent orderId=1001 product=Item3 price=245.67 -> partition=0 offset=0
+14:02:11.812 [main] INFO  OrderProducer - Sent orderId=1002 product=Item1 price=88.10 -> partition=1 offset=0
+...
+14:02:15.930 [main] INFO  OrderProducer - Sent orderId=1007 product=FLAKY-Item2 price=310.00 -> partition=2 offset=1
+
+14:02:16.010 [main] INFO  OrderConsumer - Processed orderId=1001 product=Item3 price=245.67 (partition=0, offset=0)
+14:02:16.430 [main] INFO  RetryExecutor - Transient failure for orderId=1007 (attempt 1/3): Simulated downstream unavailability... - retrying in 187ms
+14:02:16.650 [main] INFO  RetryExecutor - Transient failure for orderId=1007 (attempt 2/3): Simulated downstream unavailability... - retrying in 412ms
+14:02:17.070 [main] INFO  OrderConsumer - Processed orderId=1007 product=FLAKY-Item2 price=310.00 (partition=2, offset=1)
+14:02:17.090 [main] INFO  OrderConsumer - [AGG] processed=10 globalAvg=214.55 | Item1 avg=201.30 (n=3) | Item2 avg=250.10 (n=4) | Item3 avg=190.05 (n=3)
+14:02:20.140 [main] WARN  DlqPublisher - Sent orderId=1011 to DLQ (topic=orders.DLQ) after 1 attempt(s): PermanentException: Order 1011 has an invalid price: -1.0
+```
 
 ---
 
-This document is updated as the project grows; each part of the assignment
-is committed separately.
+This document was built up incrementally, one part per commit, matching the
+assignment's 9-part breakdown: scaffold → infra → schema → producer →
+consumer → aggregation → retry → DLQ → polish. See the Git history for the
+individual steps.
