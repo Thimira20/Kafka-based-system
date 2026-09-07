@@ -35,7 +35,44 @@ kafka-avro-orders/
 
 ## Setup & run
 
-_(filled in as each part is built — see below)_
+### 1. Start the infrastructure
+
+```powershell
+docker compose up -d
+```
+
+This brings up:
+
+| Service | Address | Purpose |
+|---|---|---|
+| Kafka broker (KRaft, no ZooKeeper) | `localhost:9092` | message broker |
+| Schema Registry | `localhost:8081` | stores `order.avsc`, checks compatibility |
+| Kafka UI | `localhost:8080` | browse topics/messages in the browser |
+
+Wait for all three containers to report healthy:
+
+```powershell
+docker compose ps
+```
+
+### 2. Create the topics
+
+```powershell
+.\scripts\create-topics.ps1
+```
+
+(Bash equivalent: `./scripts/create-topics.sh`, for WSL/macOS/Linux.)
+
+This creates:
+
+- `orders` — 3 partitions, the main topic
+- `orders.DLQ` — 1 partition, dead letter queue for permanently failed messages
+
+Topic auto-creation is disabled on the broker so these must be created explicitly.
+
+### 3. (later parts) Build and run the producer/consumer
+
+_(filled in as those parts are built)_
 
 ---
 
