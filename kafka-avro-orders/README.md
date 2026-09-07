@@ -92,9 +92,35 @@ build:
 mvn generate-sources
 ```
 
-### 4. (later parts) Build and run the producer/consumer
+### 4. Run the producer
 
-_(filled in as those parts are built)_
+Sends Avro-serialized orders to the `orders` topic (random product + price,
+no faults yet — fault injection is added in a later part).
+
+```powershell
+mvn compile exec:java "-Dexec.mainClass=com.bigdata.orders.OrderProducer" "-Dexec.args=--count 30 --delay-ms 300"
+```
+
+Arguments (both optional):
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--count` | 30 | number of orders to send |
+| `--delay-ms` | 300 | pause between sends, for a readable live demo |
+
+Each order is keyed by `orderId`, so retries/reprocessing of the same order
+always land on the same partition (ordering is preserved per order).
+
+To verify it worked:
+
+- Check `http://localhost:8081/subjects` — should list `orders-value` after
+  the first send (the producer auto-registers the schema).
+- Open Kafka UI (`http://localhost:8080`) → Topics → `orders` → Messages, to
+  see the Avro-decoded orders.
+
+### 5. (later parts) Build and run the consumer
+
+_(filled in as that part is built)_
 
 ---
 
